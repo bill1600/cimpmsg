@@ -25,12 +25,14 @@
 typedef struct connection {
   int sock;
   unsigned int rcv_count;
+  unsigned int max_rcv_count;
   struct connection * next;
 } connection_t;
 
 static struct server_stuff {
   server_opts_t opts;
   unsigned int port;
+  unsigned int max_rcv_count;
   bool send_process_terminated;
   pthread_mutex_t list_mutex;
   struct connection * connection_list;
@@ -39,6 +41,7 @@ static struct server_stuff {
      .opts = {.terminate_on_keypress = true,
        .waiting_msg = "Waiting for receive. Press <Enter> to terminate.\n"},
      .port = 0,
+     .max_rcv_count = 0,
      .send_process_terminated = false,
      .list_mutex = PTHREAD_MUTEX_INITIALIZER,
      .connection_list = NULL
@@ -156,6 +159,8 @@ void server_send_to_next_client (socket_list_t *done_list, socket_list_t *retry_
       if (find_socket_in_list (done_list, conn->sock) >= 0)
         continue;
       if (find_socket_in_list (retry_list, conn->sock) >= 0)
+        continue;
+      if ((conn->max_rcv_count > 0) && (conn->rcv_count >= conn->max_rcv_count))
         continue;
       found = true;
       if (conn->rcv_count == 0) {
@@ -281,6 +286,10 @@ void process_rcv_msg (int action_code, server_rcv_msg_data_t *rcv_msg_data)
       if (NULL != conn) {
         conn->sock = rcv_msg_data->sock;
         conn->rcv_count = 0;
+        if (NULL == SRV.connection_list)
+          conn->max_rcv_count = SRV.max_rcv_count;
+        else
+          conn->max_rcv_count = 0;
         LL_APPEND (SRV.connection_list, conn);
       } else {
         printf ("Unable to alloc memory for new connection\n");
@@ -291,6 +300,7 @@ void process_rcv_msg (int action_code, server_rcv_msg_data_t *rcv_msg_data)
       pthread_mutex_lock (&SRV.list_mutex);
       LL_FOREACH_SAFE (SRV.connection_list, conn, tmp)
         if (conn->sock == rcv_msg_data->sock) {
+          printf ("Socket %d dropped\n", conn->sock);
           LL_DELETE (SRV.connection_list, conn);
           free (conn);
           break;
@@ -300,13 +310,24 @@ void process_rcv_msg (int action_code, server_rcv_msg_data_t *rcv_msg_data)
     case CMSG_ACTION_MSG_RECEIVED:
       conn = NULL;
       pthread_mutex_lock (&SRV.list_mutex);
-      LL_FOREACH (SRV.connection_list, conn)
+      LL_FOREACH_SAFE (SRV.connection_list, conn, tmp)
         if (conn->sock == rcv_msg_data->sock) {
           conn->rcv_count += 1;
+          if (conn->max_rcv_count == 0)
+            break;
+          if (conn->rcv_count >= conn->max_rcv_count) {
+            printf ("Max receive (%d) reached on socket %d, closing.\n",
+                    conn->max_rcv_count, conn->sock);
+            cmsg_server_close_sock (conn->sock);
+            LL_DELETE (SRV.connection_list, conn);
+            free (conn);
+            conn = NULL;
+          }
           break;
         }
       pthread_mutex_unlock (&SRV.list_mutex);
-      show_msg (rcv_msg_data, conn);
+      if (NULL != conn)
+        show_msg (rcv_msg_data, conn);
       free (rcv_msg_data->rcv_msg);
       rcv_msg_data->rcv_msg = NULL;
       server_received_something = true;
@@ -318,18 +339,41 @@ void process_rcv_msg (int action_code, server_rcv_msg_data_t *rcv_msg_data)
 
 int get_args (const int argc, const char **argv)
 {
-  const char *port_str;
-  unsigned int port;
+  int i;
+  int mode = 0;
 
-  if (argc < 2) {
+  for (i=1; i<argc; i++)
+  {
+    const char *arg = argv[i];
+    if ((strlen(arg) == 1) && (arg[0] == 'm')) {
+	mode = 'm';
+	continue;
+    }
+    if ((strlen(arg) == 1) && (arg[0] == 'p')) {
+	mode = 'p';
+	continue;
+    }
+    if (mode == 'p') {
+      SRV.port = parse_num_arg (arg, "port");
+      if (SRV.port == (unsigned) -1)
+        return -1;
+      mode = 0;
+      continue;
+    }
+    if (mode == 'm') {
+      SRV.max_rcv_count = parse_num_arg (arg, "max_rcv_count");
+      if (SRV.max_rcv_count == (unsigned) -1)
+        return -1;
+      mode = 0;
+      continue;
+    }
+    printf ("arg not preceded by p/m specifier\n");
+    return -1;
+  } 
+  if (SRV.port == 0) {
     printf ("Expecting a port number argument\n");
     return -1;
   }
-  port_str = argv[1];
-  port = parse_num_arg (port_str, "port");
-  if (port == (unsigned int) (-1))
-    return -1;
-  SRV.port = port;
   return 0;
 }
 

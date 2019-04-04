@@ -80,6 +80,7 @@ int cmsg_server_listen_for_msgs (process_message_t handle_msg, bool *terminated)
 // Will exit and shutdown server if terminated flag is set,
 // or if option terminate_on_keypress specified and a key is pressed
 int cmsg_server_send (int sock, const char *msg, size_t sz_msg, bool non_block);
+int cmsg_server_close_sock (int sock);
 
 int cmsg_connect_client (struct client_conn *conn, 
   const char *ip_addr, unsigned int port, unsigned int send_timeout_msecs);

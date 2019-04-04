@@ -26,10 +26,15 @@
 #define MSG_HEADER_MARK 0xEE
 
 
+typedef struct conn_user_data {
+  bool close_request;
+} conn_user_data_t;
+
 typedef struct connection {
   int oserr;
   int rcv_state;
   bool rcv_selected;
+  struct conn_user_data *user_data;
   size_t rcv_end_pos;
   server_rcv_msg_data_t rcv_data;
   struct connection * next;
@@ -41,7 +46,7 @@ static struct server_stuff {
   struct sockaddr_in addr;
   int listen_sock;
   bool terminate_on_keypress;
-  bool is_listening;
+  int listen_state;  // 0=idle, 1=listening, 2=shutting-down
   const char *waiting_msg;
   pthread_mutex_t connect_mutex;
   pthread_mutex_t list_mutex;
@@ -49,7 +54,7 @@ static struct server_stuff {
 } SRV
  = { .port = (unsigned int) -1, .listen_sock = -1,
      .terminate_on_keypress = true,
-     .is_listening = false,
+     .listen_state = 0,
      .waiting_msg = "Waiting for receive. Press <Enter> to terminate.\n",
      .connect_mutex = PTHREAD_MUTEX_INITIALIZER,
      .list_mutex = PTHREAD_MUTEX_INITIALIZER,
@@ -65,6 +70,7 @@ void init_connection (struct connection *conn)
   conn->rcv_state = -1;
   conn->rcv_selected = false;
   conn->rcv_data.rcv_msg_size = 0;
+  conn->user_data = NULL;
   conn->rcv_end_pos = 0;
   conn->rcv_data.rcv_msg = NULL;
   conn->next = NULL;
@@ -82,8 +88,7 @@ void init_client_conn (struct client_conn *conn)
   pthread_mutex_init (&conn->rcv_mutex, NULL);
 }
 
-
-int wait_server_ready (bool *terminated)
+int wait_server_ready (bool *terminated, bool *any_closing)
 {
   struct timeval timeout;
   struct connection *conn;
@@ -107,6 +112,12 @@ int wait_server_ready (bool *terminated)
       conn->rcv_selected = false;
       if (conn->rcv_state >= 0) {
         sock = conn->rcv_data.sock;
+        if (conn->user_data->close_request) {
+          conn->rcv_state = -2;
+          *any_closing = true;
+          cmsg_log (LEVEL_DEBUG, ("CIMPMSG: Got close request for socket %d\n", sock));
+          continue;
+        } 
         // printf ("Waiting on %d\n", sock);
         if (sock > highest_sock)
           highest_sock = sock;
@@ -122,6 +133,8 @@ int wait_server_ready (bool *terminated)
       return -1;
     }
     if (rtn != 0)
+      break;
+    if (*any_closing)
       break;
     if (NULL != terminated)
       if (*terminated)
@@ -242,6 +255,29 @@ int cmsg_connect_server (const char *ip_addr, unsigned int port,
 	return 0;
 }
 
+struct connection *init_server_connection (int sock)
+{
+  struct connection *conn;
+
+  conn = (struct connection *) malloc (sizeof (struct connection));
+  if (NULL == conn) {
+    cmsg_log (LEVEL_ERROR, 
+	("CIMPMSG: Unable to malloc connection structure in receiver accept\n"));
+    return NULL;
+  }
+  init_connection (conn);
+  conn->rcv_state = 0;
+  conn->rcv_data.sock = sock;
+  conn->user_data = (struct conn_user_data *) malloc (sizeof (struct conn_user_data));
+  if (NULL == conn) {
+    cmsg_log (LEVEL_ERROR, 
+	("CIMPMSG: Unable to malloc connection user data in receiver accept\n"));
+    return NULL;
+  }
+  conn->user_data->close_request = false;
+  return conn;
+}
+
 int server_accept (process_message_t handle_msg)
 {
   int sock;
@@ -270,15 +306,11 @@ int server_accept (process_message_t handle_msg)
 	return -1;
   }
 #endif
-  conn = (struct connection *) malloc (sizeof (struct connection));
+  conn = init_server_connection (sock);
   if (NULL == conn) {
-    cmsg_log (LEVEL_ERROR, 
-	("CIMPMSG: Unable to malloc connection structure in receiver accept\n"));
     return -1;
   }
-  init_connection (conn);
-  conn->rcv_state = 0;
-  conn->rcv_data.sock = sock;
+//CONN_INACTIVE  
   pthread_mutex_lock (&SRV.list_mutex);
   LL_APPEND (SRV.connection_list, conn);
   handle_msg (CMSG_ACTION_CONN_ADDED, &conn->rcv_data);
@@ -300,6 +332,9 @@ void shutdown_connection (struct connection *conn)
     close (conn->rcv_data.sock);
     conn->rcv_data.sock = -1;
     conn->rcv_state = -1;
+//CONN_INACTIVE  
+    if (NULL != conn->user_data)
+      free (conn->user_data);
   }
 }
  
@@ -515,12 +550,10 @@ int cmsg_client_receive (struct client_conn *cconn)
   return rtn;
 }
 
-int server_receive_msgs (process_message_t handle_msg)
+void server_receive_msgs (process_message_t handle_msg, bool *any_closing)
 {
   int rtn;
-  int error_cnt = 0;
   struct connection *conn;
-  struct connection *tmp;
   
   LL_FOREACH (SRV.connection_list, conn)
     if (conn->rcv_selected) {
@@ -532,10 +565,18 @@ int server_receive_msgs (process_message_t handle_msg)
         continue;
       if (rtn < 0) {
         conn->rcv_state = -2;
+        *any_closing = true;
         handle_msg (CMSG_ACTION_CONN_DROPPED, &conn->rcv_data);
       }
     }
+}
 
+void server_close_connections (void)
+{
+  struct connection *conn;
+  struct connection *tmp;
+
+  cmsg_log (LEVEL_DEBUG, ("CIMPMSG: server_close_connections\n"));
   pthread_mutex_lock (&SRV.list_mutex);
   LL_FOREACH_SAFE (SRV.connection_list, conn, tmp)
     if (conn->rcv_state == -2) {
@@ -544,22 +585,15 @@ int server_receive_msgs (process_message_t handle_msg)
 	  ("CIMPMSG: Closing connection for socket %d\n", conn->rcv_data.sock));
         shutdown_connection (conn);
         free (conn);
-        error_cnt++;
     }
   pthread_mutex_unlock (&SRV.list_mutex);
-
-   if (error_cnt == 0)
-     return 0;
-   if (NULL != SRV.connection_list)
-     return 0;
-
-   return -1;
 }
 
 
 int cmsg_server_listen_for_msgs (process_message_t handle_msg, bool *terminated)
 {
   int rtn;
+  bool any_closing;
   char inbuf[10];
 
   pthread_mutex_lock (&SRV.connect_mutex);
@@ -568,34 +602,45 @@ int cmsg_server_listen_for_msgs (process_message_t handle_msg, bool *terminated)
     pthread_mutex_unlock (&SRV.connect_mutex);
     return ENOTCONN;
   }
-  if (SRV.is_listening) {
-    cmsg_log (LEVEL_ERROR, ("CIMPMSG: server already listening for messages\n"));
+  if (SRV.listen_state != 0) {
+    if (SRV.listen_state == 1)
+      cmsg_log (LEVEL_ERROR, ("CIMPMSG: server already listening for messages\n"));
+    else
+      cmsg_log (LEVEL_ERROR, ("CIMPMSG: server shutting down\n"));
     pthread_mutex_unlock (&SRV.connect_mutex);
     return EALREADY;
   }
-  SRV.is_listening = true;
+  SRV.listen_state = 1;
   pthread_mutex_unlock (&SRV.connect_mutex);
 
   while (1)
   {
-	  rtn = wait_server_ready (terminated);
-	  if (rtn < 0)
-	    break;
-	  if (rtn & 1)
-	    server_accept (handle_msg);
-	  if (rtn & 2)
-	    server_receive_msgs (handle_msg);
-	  if (SRV.terminate_on_keypress) {
-	    if (rtn & 4) { // key pressed
-	      fgets (inbuf, 10, stdin);
-	      break;
-	    }
-	  }
-	  if (NULL != terminated)
-            if (*terminated)
-	      break;
+    any_closing = false;
+    rtn = wait_server_ready (terminated, &any_closing);
+    if (rtn < 0)
+      break;
+    if (rtn & 1)
+      server_accept (handle_msg);
+    if (rtn & 2)
+      server_receive_msgs (handle_msg, &any_closing);
+    if (any_closing)
+      server_close_connections ();
+    if (SRV.terminate_on_keypress) {
+      if (rtn & 4) { // key pressed
+	fgets (inbuf, 10, stdin);
+	break;
+      }
+    }
+    if (NULL != terminated)
+      if (*terminated)
+	break;
   }
   cmsg_log (LEVEL_INFO, ("CIMPMSG: Exiting cmsg_server_listen_for_msgs\n"));
+
+  pthread_mutex_lock (&SRV.connect_mutex);
+  SRV.listen_state = 2;
+  pthread_mutex_unlock (&SRV.connect_mutex);
+
   shutdown_server ();
   return 0;
 }
@@ -658,6 +703,14 @@ int cmsg_server_send (int sock, const char *msg, size_t sz_msg, bool non_block)
   struct connection *conn;
 
   pthread_mutex_lock (&SRV.list_mutex);
+  if (SRV.listen_state != 1) {
+    if (SRV.listen_state == 0)
+      cmsg_log (LEVEL_DEBUG, ("CIMPMSG: cannot send, server not started\n"));
+    else
+      cmsg_log (LEVEL_DEBUG, ("CIMPMSG: cannot send, server shutting down\n"));
+    pthread_mutex_unlock (&SRV.list_mutex);
+    return rtn;
+  }
   LL_FOREACH (SRV.connection_list, conn)
   {
     if (conn->rcv_state >= 0) {
@@ -670,3 +723,34 @@ int cmsg_server_send (int sock, const char *msg, size_t sz_msg, bool non_block)
   pthread_mutex_unlock (&SRV.list_mutex);
   return rtn;
 }
+
+int cmsg_server_close_sock (int sock)
+{
+  int rtn = EBADF;
+  struct connection *conn;
+
+  pthread_mutex_lock (&SRV.list_mutex);
+  if (SRV.listen_state != 1) {
+    if (SRV.listen_state == 0)
+      cmsg_log (LEVEL_DEBUG, ("CIMPMSG: cannot close socket, server not started\n"));
+    else
+      cmsg_log (LEVEL_DEBUG, ("CIMPMSG: cannot close socket, server shutting down\n"));
+    pthread_mutex_unlock (&SRV.list_mutex);
+    return rtn;
+  }
+  LL_FOREACH (SRV.connection_list, conn)
+  {
+    if (conn->rcv_state >= 0) {
+      if (conn->rcv_data.sock == sock) {
+        conn->user_data->close_request = true;
+	rtn = 0;
+        break;
+      }
+    }
+  }
+  pthread_mutex_unlock (&SRV.list_mutex);
+  if (rtn != 0)
+     cmsg_log (LEVEL_DEBUG, ("CIMPMSG: Requested close socket (%d) not found\n", sock));
+  return rtn;
+}
+

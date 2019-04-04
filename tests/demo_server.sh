@@ -1,2 +1,2 @@
-../build/tests/cimpmsg_test_server 6666
+../build/tests/cimpmsg_test_server p 6666 m 175
 

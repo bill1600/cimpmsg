@@ -23,6 +23,7 @@
 struct options {
   bool send_random;
   bool print_send_msgs;
+  bool sleep_at_end;
   unsigned int msg_filler;
 } OPT;
 
@@ -43,6 +44,7 @@ void init_options (void)
 {
   OPT.send_random = false;
   OPT.print_send_msgs = false;
+  OPT.sleep_at_end = false;
   OPT.msg_filler = 0;
 }
 
@@ -184,6 +186,10 @@ int get_args (const int argc, const char **argv)
 			OPT.send_random = true;
 			continue;
 		}
+		if ((mode == 0) && (strcmp(arg, "sl") == 0)) {
+			OPT.sleep_at_end = true;
+			continue;
+		}
 		if (mode == 's') {
 			CLI.port_str = arg;
 			mode = 0;
@@ -213,6 +219,7 @@ int get_args (const int argc, const char **argv)
 	} 
 	return 0;
 }
+
 
 int main (const int argc, const char **argv)
 {
@@ -249,6 +256,13 @@ int main (const int argc, const char **argv)
 	if (create_thread (&client_rcv_thread_id, client_receiver_thread, &CLI.conn) == 0)
 	{
  	    client_send_multiple ();
+	    if (OPT.sleep_at_end) {
+	      int i;
+	      for (i=0; i<45; i+=5) {
+		 printf ("Sleeping..\n");
+	         sleep (5);
+	      }
+	    }
             CLI.conn.terminated = true;
             pthread_join (client_rcv_thread_id, NULL);
 	}
