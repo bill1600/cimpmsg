@@ -33,15 +33,20 @@ static struct server_stuff {
   server_opts_t opts;
   unsigned int port;
   unsigned int max_rcv_count;
+  unsigned int idle_notify_count;
+  const char *waiting_msg;
+  bool rcv_process_terminated;
   bool send_process_terminated;
   pthread_mutex_t list_mutex;
   struct connection * connection_list;
 } SRV
  = {
-     .opts = {.terminate_on_keypress = true,
-       .waiting_msg = "Waiting for receive. Press <Enter> to terminate.\n"},
+     .opts = {.terminate_on_keypress = true, .idle_notify_interval_secs = 2},
      .port = 0,
      .max_rcv_count = 0,
+     .idle_notify_count = 0,
+     .waiting_msg = "Waiting for receive. Press <Enter> to terminate.\n",
+     .rcv_process_terminated = false,
      .send_process_terminated = false,
      .list_mutex = PTHREAD_MUTEX_INITIALIZER,
      .connection_list = NULL
@@ -331,6 +336,20 @@ void process_rcv_msg (int action_code, server_rcv_msg_data_t *rcv_msg_data)
       free (rcv_msg_data->rcv_msg);
       rcv_msg_data->rcv_msg = NULL;
       server_received_something = true;
+      SRV.idle_notify_count = 0;
+      break;
+    case CMSG_ACTION_IDLE_NOTIFY:
+      if (!server_received_something) {
+        printf (SRV.waiting_msg);
+        break;
+      }
+      ++SRV.idle_notify_count;
+      if (SRV.idle_notify_count >= 8) {
+        printf ("Terminating...\n");
+        SRV.rcv_process_terminated = true;
+      } else {
+        printf (SRV.waiting_msg);
+      }
       break;
     default:
       printf ("Invalid action code %d\n", action_code);
@@ -386,7 +405,8 @@ int main (const int argc, const char **argv)
 		exit(4);
 	if (create_thread (&server_send_thread_id, server_send_thread, NULL) == 0)
 	{
-	    cmsg_server_listen_for_msgs (process_rcv_msg, NULL);
+	    cmsg_server_listen_for_msgs
+                (process_rcv_msg, &SRV.rcv_process_terminated);
 	    SRV.send_process_terminated = true;
 	    pthread_join (server_send_thread_id, NULL);
 	}

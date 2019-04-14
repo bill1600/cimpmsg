@@ -47,7 +47,7 @@ static struct server_stuff {
   int listen_sock;
   bool terminate_on_keypress;
   int listen_state;  // 0=idle, 1=listening, 2=shutting-down
-  const char *waiting_msg;
+  unsigned idle_notify_secs;
   pthread_mutex_t connect_mutex;
   pthread_mutex_t list_mutex;
   struct connection * connection_list;
@@ -55,7 +55,7 @@ static struct server_stuff {
  = { .port = (unsigned int) -1, .listen_sock = -1,
      .terminate_on_keypress = true,
      .listen_state = 0,
-     .waiting_msg = "Waiting for receive. Press <Enter> to terminate.\n",
+     .idle_notify_secs = 2,
      .connect_mutex = PTHREAD_MUTEX_INITIALIZER,
      .list_mutex = PTHREAD_MUTEX_INITIALIZER,
      .connection_list = NULL
@@ -88,14 +88,19 @@ void init_client_conn (struct client_conn *conn)
   pthread_mutex_init (&conn->rcv_mutex, NULL);
 }
 
-int wait_server_ready (bool *terminated, bool *any_closing)
+int wait_server_ready (process_message_t handle_msg, bool *terminated, bool *any_closing)
 {
   struct timeval timeout;
   struct connection *conn;
   int rtn, sock, highest_sock;
-  int timeout_count = 0;
+  unsigned timeout_count = 0;
+  unsigned max_count;
   fd_set fds;
+  server_rcv_msg_data_t notify_data = {
+    .sock = -1, .rcv_msg = NULL, .rcv_msg_size = 0
+  };
 
+  max_count = SRV.idle_notify_secs * 2; 
   highest_sock = -1;
 
   while (1)
@@ -136,14 +141,16 @@ int wait_server_ready (bool *terminated, bool *any_closing)
       break;
     if (*any_closing)
       break;
+    if (max_count != 0) {
+      ++timeout_count;
+      if (timeout_count >= max_count) {
+        handle_msg (CMSG_ACTION_IDLE_NOTIFY, &notify_data);
+        timeout_count = 0;
+      }
+    }
     if (NULL != terminated)
       if (*terminated)
         break;
-    if (NULL != SRV.waiting_msg) {
-      ++timeout_count;
-      if ((timeout_count & 3) == 0)
-        printf (SRV.waiting_msg);
-    }
   }
   rtn = 0;
   if (SRV.listen_sock != -1)
@@ -197,7 +204,7 @@ int cmsg_connect_server (const char *ip_addr, unsigned int port,
 	}
 	if (NULL != options) {
 		SRV.terminate_on_keypress = options->terminate_on_keypress;
-		SRV.waiting_msg = options->waiting_msg;
+		SRV.idle_notify_secs = options->idle_notify_interval_secs;
 	}
 
 	if ((NULL == ip_addr) || ((unsigned int) -1 == port)) {
@@ -616,7 +623,7 @@ int cmsg_server_listen_for_msgs (process_message_t handle_msg, bool *terminated)
   while (1)
   {
     any_closing = false;
-    rtn = wait_server_ready (terminated, &any_closing);
+    rtn = wait_server_ready (handle_msg, terminated, &any_closing);
     if (rtn < 0)
       break;
     if (rtn & 1)
