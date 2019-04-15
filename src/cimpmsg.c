@@ -328,15 +328,27 @@ int server_accept (process_message_t handle_msg)
 
 void shutdown_sock (int sock)
 {
-    shutdown (sock, SHUT_RDWR);
-    close (sock);
+    struct linger linger_opt = {1, 0};
+
+    if (shutdown (sock, SHUT_RDWR) != 0)
+      cmsg_log_err (LEVEL_ERROR, errno, 
+       ("CIMPMSG: Error shutting down socket %d", sock));
+    if (close (sock) == 0)
+      return;
+    cmsg_log_err (LEVEL_ERROR, errno, ("CIMPMSG: Error closing socket %d", sock));
+    if (setsockopt (sock, SOL_SOCKET, SO_LINGER, &linger_opt, sizeof linger_opt) < 0) {
+      cmsg_log_err (LEVEL_ERROR, errno, 
+        ("CIMPMSG: Error setting linger sockopt for socket %d", sock));
+      return;
+    }      
+    if (close (sock) != 0)
+      cmsg_log_err (LEVEL_ERROR, errno, ("CIMPMSG: Error closing socket %d", sock));
 }
 
 void shutdown_connection (struct connection *conn)
 {
   if (conn->rcv_state != -1) {
-    shutdown (conn->rcv_data.sock, SHUT_RDWR);
-    close (conn->rcv_data.sock);
+    shutdown_sock (conn->rcv_data.sock);
     conn->rcv_data.sock = -1;
     conn->rcv_state = -1;
 //CONN_INACTIVE  
@@ -407,8 +419,7 @@ int cmsg_connect_client (struct client_conn *conn,
 		conn->oserr = errno;
 		cmsg_log_err (LEVEL_ERROR, errno, 
 		  ("CIMPMSG: Unable to connect to client socket:"));
-		shutdown (sock, SHUT_RDWR);
-		close (sock);
+		shutdown_sock (sock);
 		return conn->oserr;
 	}
 	conn->sock = sock;
