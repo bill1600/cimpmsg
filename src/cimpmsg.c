@@ -35,6 +35,8 @@ typedef struct connection {
   int rcv_state;
   bool rcv_selected;
   struct conn_user_data *user_data;
+  struct timespec last_active;
+  pthread_mutex_t conn_access_mutex;
   size_t rcv_end_pos;
   server_rcv_msg_data_t rcv_data;
   struct connection * next;
@@ -48,6 +50,7 @@ static struct server_stuff {
   bool terminate_on_keypress;
   int listen_state;  // 0=idle, 1=listening, 2=shutting-down
   unsigned idle_notify_secs;
+  unsigned dead_conn_notify_secs;
   pthread_mutex_t connect_mutex;
   pthread_mutex_t list_mutex;
   struct connection * connection_list;
@@ -56,6 +59,7 @@ static struct server_stuff {
      .terminate_on_keypress = true,
      .listen_state = 0,
      .idle_notify_secs = 2,
+     .dead_conn_notify_secs = 30,
      .connect_mutex = PTHREAD_MUTEX_INITIALIZER,
      .list_mutex = PTHREAD_MUTEX_INITIALIZER,
      .connection_list = NULL
@@ -71,6 +75,7 @@ void init_connection (struct connection *conn)
   conn->rcv_selected = false;
   conn->rcv_data.rcv_msg_size = 0;
   conn->user_data = NULL;
+  pthread_mutex_init (&conn->conn_access_mutex, NULL);
   conn->rcv_end_pos = 0;
   conn->rcv_data.rcv_msg = NULL;
   conn->next = NULL;
@@ -88,31 +93,64 @@ void init_client_conn (struct client_conn *conn)
   pthread_mutex_init (&conn->rcv_mutex, NULL);
 }
 
+bool time_is_older (struct timespec *t1, struct timespec *t2)
+{
+  static bool test_toggle = false;
+
+  if (t1->tv_sec < t2->tv_sec)
+    return true;
+  if (t1->tv_sec > t2->tv_sec)
+    return false;
+  if (t1->tv_nsec < t2->tv_nsec)
+    return true;
+  if (t1->tv_nsec > t2->tv_nsec)
+    return false;
+  test_toggle = !test_toggle;
+  return test_toggle;
+}
+
+bool time_is_out_of_date (struct timespec *t1, unsigned secs)
+{
+  struct timespec current;
+  unsigned t1_plus_secs = t1->tv_sec + secs;
+
+  clock_gettime (CLOCK_REALTIME, &current);
+  if (t1_plus_secs < current.tv_sec)
+    return true;
+  if (t1_plus_secs > current.tv_sec)
+    return false;
+  if (t1->tv_nsec <= current.tv_nsec)
+    return true;
+  return false;
+}
+
 int wait_server_ready (process_message_t handle_msg, bool *terminated, bool *any_closing)
 {
-  struct timeval timeout;
+  struct timeval select_timeout;
   struct connection *conn;
+  struct connection *oldest_inactive = NULL;
   int rtn, sock, highest_sock;
-  unsigned timeout_count = 0;
-  unsigned max_count;
+  unsigned idle_timeout_count = 0;
+  unsigned max_idle_count;
   fd_set fds;
   server_rcv_msg_data_t notify_data = {
     .sock = -1, .rcv_msg = NULL, .rcv_msg_size = 0
   };
 
-  max_count = SRV.idle_notify_secs * 2; 
+  max_idle_count = SRV.idle_notify_secs * 2; 
   highest_sock = -1;
 
   while (1)
   {
-    timeout.tv_sec = 0;
-    timeout.tv_usec = 500000;
+    select_timeout.tv_sec = 0;
+    select_timeout.tv_usec = 500000;
     FD_ZERO (&fds);
     if (SRV.listen_sock != -1) {
       FD_SET (SRV.listen_sock, &fds);
       highest_sock = SRV.listen_sock;
       // printf ("Waiting on listener %d\n", listen_sock);
     }
+    // Prepare for 'select'
     LL_FOREACH (SRV.connection_list, conn) {
       conn->rcv_selected = false;
       if (conn->rcv_state >= 0) {
@@ -132,7 +170,7 @@ int wait_server_ready (process_message_t handle_msg, bool *terminated, bool *any
     if (SRV.terminate_on_keypress) {
       FD_SET (STDIN_FILENO, &fds);
     }
-    rtn = select (highest_sock+1, &fds, NULL, NULL, &timeout);
+    rtn = select (highest_sock+1, &fds, NULL, NULL, &select_timeout);
     if (rtn < 0) {
       cmsg_log (LEVEL_ERROR, ("CIMPMSG: Error on select for receive\n"));
       return -1;
@@ -141,11 +179,11 @@ int wait_server_ready (process_message_t handle_msg, bool *terminated, bool *any
       break;
     if (*any_closing)
       break;
-    if (max_count != 0) {
-      ++timeout_count;
-      if (timeout_count >= max_count) {
-        handle_msg (CMSG_ACTION_IDLE_NOTIFY, &notify_data);
-        timeout_count = 0;
+    if (max_idle_count != 0) {
+      ++idle_timeout_count;
+      if (idle_timeout_count >= max_idle_count) {
+        handle_msg (CMSG_ACTION_ALL_IDLE_NOTIFY, &notify_data);
+        idle_timeout_count = 0;
       }
     }
     if (NULL != terminated)
@@ -156,13 +194,21 @@ int wait_server_ready (process_message_t handle_msg, bool *terminated, bool *any
   if (SRV.listen_sock != -1)
     if (FD_ISSET (SRV.listen_sock, &fds))
       rtn = 1;
+  // flag all sockets ready to read as indicated by 'select'
   LL_FOREACH (SRV.connection_list, conn) {
-    if (conn->rcv_state >= 0)
+    if (conn->rcv_state >= 0) {
       if (FD_ISSET (conn->rcv_data.sock, &fds)) {
         conn->rcv_selected = true;
         rtn |= 2;
       }
+      if ((NULL == oldest_inactive) ||
+          (time_is_older (&conn->last_active, &oldest_inactive->last_active)) )
+        oldest_inactive = conn;
+    }
   }
+  if (NULL != oldest_inactive)
+    if (time_is_out_of_date (&oldest_inactive->last_active, SRV.dead_conn_notify_secs))
+      handle_msg (CMSG_ACTION_CONN_INACTIVE, &oldest_inactive->rcv_data);
   if (SRV.terminate_on_keypress) {
     if (FD_ISSET (STDIN_FILENO, &fds))
       rtn |= 4;
@@ -204,7 +250,7 @@ int cmsg_connect_server (const char *ip_addr, unsigned int port,
 	}
 	if (NULL != options) {
 		SRV.terminate_on_keypress = options->terminate_on_keypress;
-		SRV.idle_notify_secs = options->idle_notify_interval_secs;
+		SRV.idle_notify_secs = options->all_idle_notify_secs;
 	}
 
 	if ((NULL == ip_addr) || ((unsigned int) -1 == port)) {
@@ -289,6 +335,7 @@ int server_accept (process_message_t handle_msg)
 {
   int sock;
   struct connection *conn;
+  server_rcv_msg_data_t rcv_msg_data;
 
   sock = accept (SRV.listen_sock, NULL, NULL);
   if (sock < 0) {
@@ -317,11 +364,13 @@ int server_accept (process_message_t handle_msg)
   if (NULL == conn) {
     return -1;
   }
-//CONN_INACTIVE  
+  rcv_msg_data = conn->rcv_data; // save data for the callback
+  clock_gettime (CLOCK_REALTIME, &conn->last_active);
   pthread_mutex_lock (&SRV.list_mutex);
   LL_APPEND (SRV.connection_list, conn);
-  handle_msg (CMSG_ACTION_CONN_ADDED, &conn->rcv_data);
   pthread_mutex_unlock (&SRV.list_mutex);
+  // Don't want callback in the mutex lock
+  handle_msg (CMSG_ACTION_CONN_ADDED, &rcv_msg_data);
   return 0;
 
 }
@@ -351,7 +400,7 @@ void shutdown_connection (struct connection *conn)
     shutdown_sock (conn->rcv_data.sock);
     conn->rcv_data.sock = -1;
     conn->rcv_state = -1;
-//CONN_INACTIVE  
+    pthread_mutex_destroy (&conn->conn_access_mutex);
     if (NULL != conn->user_data)
       free (conn->user_data);
   }
@@ -530,9 +579,12 @@ int receive_msg_data (struct connection *conn, process_message_t handle_msg,
         bytes, read_len));
     return 0;
   }
+  conn->rcv_state = 0;
+  pthread_mutex_lock (&conn->conn_access_mutex);
+  clock_gettime (CLOCK_REALTIME, &conn->last_active);
+  pthread_mutex_unlock (&conn->conn_access_mutex);
   if (NULL != handle_msg)
     handle_msg (CMSG_ACTION_MSG_RECEIVED, &conn->rcv_data);
-  conn->rcv_state = 0;
   return 1;
 }
 
@@ -734,6 +786,11 @@ int cmsg_server_send (int sock, const char *msg, size_t sz_msg, bool non_block)
     if (conn->rcv_state >= 0) {
       if (conn->rcv_data.sock == sock) {
         rtn = __send_msg (sock, msg, sz_msg, non_block);
+        if (0 == rtn) {
+          pthread_mutex_lock (&conn->conn_access_mutex);
+          clock_gettime (CLOCK_REALTIME, &conn->last_active);
+          pthread_mutex_unlock (&conn->conn_access_mutex);
+        }
         break;
       }
     }

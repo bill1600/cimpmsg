@@ -24,6 +24,7 @@ struct options {
   bool send_random;
   bool print_send_msgs;
   bool sleep_at_end;
+  bool send_stop_msg_at_end;
   unsigned int msg_filler;
 } OPT;
 
@@ -45,6 +46,7 @@ void init_options (void)
   OPT.send_random = false;
   OPT.print_send_msgs = false;
   OPT.sleep_at_end = false;
+  OPT.send_stop_msg_at_end = false;
   OPT.msg_filler = 0;
 }
 
@@ -126,6 +128,15 @@ void make_filled_msg (const char *msg, unsigned msg_num, char *filled_msg)
   sprintf (filled_msg+OPT.msg_filler, "%s %d", msg, msg_num);
 }
 
+void wait_with_msg (unsigned wait_secs)
+{
+  unsigned i;
+  for (i=0; i<wait_secs; i+=5) {
+    printf ("Sleeping..\n");
+    sleep (5);
+  }
+}
+
 void client_send_multiple (void)
 {
   unsigned long i;
@@ -151,6 +162,12 @@ void client_send_multiple (void)
 	  if (OPT.print_send_msgs)
 	    printf ("Sent msg %lu\n", i);
   }
+  if (OPT.send_stop_msg_at_end) {
+    printf ("Sending STOP message\n");
+    strncpy (buf, "STOP\n", 6);
+    cmsg_client_send (&CLI.conn, buf, 6, false);
+    wait_with_msg (30);
+  }
 }
 
 
@@ -162,8 +179,10 @@ int get_args (const int argc, const char **argv)
 	for (i=1; i<argc; i++)
 	{
 		const char *arg = argv[i];
-		if ((strlen(arg) == 1) && (arg[0] == 's')) {
-			mode = 's';
+		if ((strlen(arg) == 1) && 
+		    ((arg[0] == 's') || (arg[0] == 'p')) ) 
+		{
+			mode = 'p';
 			continue;
 		}
 		if ((strlen(arg) == 1) && (arg[0] == 'm')) {
@@ -190,7 +209,11 @@ int get_args (const int argc, const char **argv)
 			OPT.sleep_at_end = true;
 			continue;
 		}
-		if (mode == 's') {
+		if ((mode == 0) && (strcmp(arg, "st") == 0)) {
+			OPT.send_stop_msg_at_end = true;
+			continue;
+		}
+		if (mode == 'p') {
 			CLI.port_str = arg;
 			mode = 0;
 			continue;
@@ -257,11 +280,10 @@ int main (const int argc, const char **argv)
 	{
  	    client_send_multiple ();
 	    if (OPT.sleep_at_end) {
-	      int i;
-	      for (i=0; i<45; i+=5) {
-		 printf ("Sleeping..\n");
-	         sleep (5);
-	      }
+	      if (OPT.send_stop_msg_at_end)
+		wait_with_msg (15);
+              else
+		wait_with_msg (45);
 	    }
             CLI.conn.terminated = true;
             pthread_join (client_rcv_thread_id, NULL);

@@ -46,7 +46,8 @@ typedef struct client_conn {
 
 typedef struct server_opts {
   bool terminate_on_keypress;
-  unsigned idle_notify_interval_secs;
+  unsigned all_idle_notify_secs;
+  unsigned dead_conn_notify_secs;
 } server_opts_t;
 
 typedef struct server_rcv_msg_data {
@@ -58,7 +59,8 @@ typedef struct server_rcv_msg_data {
 #define CMSG_ACTION_MSG_RECEIVED	0
 #define CMSG_ACTION_CONN_ADDED		1
 #define CMSG_ACTION_CONN_DROPPED	2
-#define CMSG_ACTION_IDLE_NOTIFY         3
+#define CMSG_ACTION_CONN_INACTIVE       3
+#define CMSG_ACTION_ALL_IDLE_NOTIFY     4
 
 typedef void (* process_message_t) 
     (int action_code, server_rcv_msg_data_t *rcv_msg_data);
