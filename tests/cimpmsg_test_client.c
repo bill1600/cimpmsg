@@ -166,7 +166,7 @@ void client_send_multiple (void)
     printf ("Sending STOP message\n");
     strncpy (buf, "STOP\n", 6);
     cmsg_client_send (&CLI.conn, buf, 6, false);
-    wait_with_msg (30);
+    wait_with_msg (35);
   }
 }
 
@@ -281,7 +281,7 @@ int main (const int argc, const char **argv)
  	    client_send_multiple ();
 	    if (OPT.sleep_at_end) {
 	      if (OPT.send_stop_msg_at_end)
-		wait_with_msg (15);
+		wait_with_msg (10);
               else
 		wait_with_msg (45);
 	    }

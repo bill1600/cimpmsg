@@ -47,7 +47,7 @@ typedef struct client_conn {
 typedef struct server_opts {
   bool terminate_on_keypress;
   unsigned all_idle_notify_secs;
-  unsigned dead_conn_notify_secs;
+  unsigned inactive_conn_notify_secs;
 } server_opts_t;
 
 typedef struct server_rcv_msg_data {

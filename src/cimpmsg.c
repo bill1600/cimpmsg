@@ -50,7 +50,7 @@ static struct server_stuff {
   bool terminate_on_keypress;
   int listen_state;  // 0=idle, 1=listening, 2=shutting-down
   unsigned idle_notify_secs;
-  unsigned dead_conn_notify_secs;
+  unsigned inactive_conn_notify_secs;
   pthread_mutex_t connect_mutex;
   pthread_mutex_t list_mutex;
   struct connection * connection_list;
@@ -59,7 +59,7 @@ static struct server_stuff {
      .terminate_on_keypress = true,
      .listen_state = 0,
      .idle_notify_secs = 2,
-     .dead_conn_notify_secs = 30,
+     .inactive_conn_notify_secs = 30,
      .connect_mutex = PTHREAD_MUTEX_INITIALIZER,
      .list_mutex = PTHREAD_MUTEX_INITIALIZER,
      .connection_list = NULL
@@ -122,6 +122,13 @@ bool time_is_out_of_date (struct timespec *t1, unsigned secs)
   if (t1->tv_nsec <= current.tv_nsec)
     return true;
   return false;
+}
+
+void set_last_active_time (struct connection *conn)
+{
+  pthread_mutex_lock (&conn->conn_access_mutex);
+  clock_gettime (CLOCK_REALTIME, &conn->last_active);
+  pthread_mutex_unlock (&conn->conn_access_mutex);
 }
 
 int wait_server_ready (process_message_t handle_msg, bool *terminated, bool *any_closing)
@@ -207,8 +214,10 @@ int wait_server_ready (process_message_t handle_msg, bool *terminated, bool *any
     }
   }
   if (NULL != oldest_inactive)
-    if (time_is_out_of_date (&oldest_inactive->last_active, SRV.dead_conn_notify_secs))
+    if (time_is_out_of_date (&oldest_inactive->last_active, SRV.inactive_conn_notify_secs)) {
       handle_msg (CMSG_ACTION_CONN_INACTIVE, &oldest_inactive->rcv_data);
+      set_last_active_time (oldest_inactive);
+    }
   if (SRV.terminate_on_keypress) {
     if (FD_ISSET (STDIN_FILENO, &fds))
       rtn |= 4;
@@ -580,9 +589,7 @@ int receive_msg_data (struct connection *conn, process_message_t handle_msg,
     return 0;
   }
   conn->rcv_state = 0;
-  pthread_mutex_lock (&conn->conn_access_mutex);
-  clock_gettime (CLOCK_REALTIME, &conn->last_active);
-  pthread_mutex_unlock (&conn->conn_access_mutex);
+  set_last_active_time (conn);
   if (NULL != handle_msg)
     handle_msg (CMSG_ACTION_MSG_RECEIVED, &conn->rcv_data);
   return 1;
@@ -786,11 +793,8 @@ int cmsg_server_send (int sock, const char *msg, size_t sz_msg, bool non_block)
     if (conn->rcv_state >= 0) {
       if (conn->rcv_data.sock == sock) {
         rtn = __send_msg (sock, msg, sz_msg, non_block);
-        if (0 == rtn) {
-          pthread_mutex_lock (&conn->conn_access_mutex);
-          clock_gettime (CLOCK_REALTIME, &conn->last_active);
-          pthread_mutex_unlock (&conn->conn_access_mutex);
-        }
+        if (0 == rtn)
+          set_last_active_time (conn);
         break;
       }
     }

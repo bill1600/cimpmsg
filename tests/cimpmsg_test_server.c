@@ -37,6 +37,7 @@ static struct server_stuff {
   unsigned int idle_notify_count;
   unsigned int max_idle_count;
   const char *waiting_msg;
+  bool close_inactive;
   bool rcv_process_terminated;
   bool send_process_terminated;
   pthread_mutex_t list_mutex;
@@ -45,12 +46,13 @@ static struct server_stuff {
  = {
      .opts = {.terminate_on_keypress = true, 
        .all_idle_notify_secs = 2,
-       .dead_conn_notify_secs = 30},
+       .inactive_conn_notify_secs = 30},
      .port = 0,
      .max_rcv_count = 0,
      .idle_notify_count = 0,
      .max_idle_count = 0,
      .waiting_msg = "Waiting for receive. Press <Enter> to terminate.\n",
+     .close_inactive = false,
      .rcv_process_terminated = false,
      .send_process_terminated = false,
      .list_mutex = PTHREAD_MUTEX_INITIALIZER,
@@ -350,10 +352,14 @@ void process_rcv_msg (int action_code, server_rcv_msg_data_t *rcv_msg_data)
       pthread_mutex_lock (&SRV.list_mutex);
       LL_FOREACH_SAFE (SRV.connection_list, conn, tmp)
         if (conn->sock == rcv_msg_data->sock) {
-          printf ("Closing inactive socket %d\n", conn->sock);
-          inactive_sock = conn->sock;
-          LL_DELETE (SRV.connection_list, conn);
-          free (conn);
+          if (SRV.close_inactive) {
+            printf ("Closing inactive socket %d\n", conn->sock);
+            inactive_sock = conn->sock;
+            LL_DELETE (SRV.connection_list, conn);
+            free (conn);
+          } else {
+            printf ("Socket %d is inactive\n", conn->sock);
+          }
           break;
         }
       pthread_mutex_unlock (&SRV.list_mutex);
@@ -420,6 +426,11 @@ int get_args (const int argc, const char **argv)
 	mode = 'p';
 	continue;
     }
+   if ((mode == 0) && (strcmp(arg, "ci") == 0)) {
+     SRV.close_inactive = true;
+     continue;
+   }
+
     if (mode == 'p') {
       SRV.port = parse_num_arg (arg, "port");
       if (SRV.port == (unsigned) -1)
