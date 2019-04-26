@@ -414,23 +414,24 @@ int get_args (const int argc, const char **argv)
   for (i=1; i<argc; i++)
   {
     const char *arg = argv[i];
-    if ((strlen(arg) == 1) && (arg[0] == 'm')) {
+    if (mode == 0) {
+      if ((strlen(arg) == 1) && (arg[0] == 'm')) {
 	mode = 'm';
 	continue;
-    }
-    if ((strlen(arg) == 1) && (arg[0] == 'i')) {
+      }
+      if ((strlen(arg) == 1) && (arg[0] == 'i')) {
 	mode = 'i';
 	continue;
-    }
-    if ((strlen(arg) == 1) && (arg[0] == 'p')) {
+      }
+      if ((strlen(arg) == 1) && (arg[0] == 'p')) {
 	mode = 'p';
 	continue;
+      }
+      if (strcmp(arg, "ci") == 0) {
+        SRV.close_inactive = true;
+        continue;
+      }
     }
-   if ((mode == 0) && (strcmp(arg, "ci") == 0)) {
-     SRV.close_inactive = true;
-     continue;
-   }
-
     if (mode == 'p') {
       SRV.port = parse_num_arg (arg, "port");
       if (SRV.port == (unsigned) -1)

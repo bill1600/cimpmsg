@@ -125,14 +125,14 @@ void make_filled_msg (const char *msg, unsigned msg_num, char *filled_msg)
   unsigned int i;
   for (i=0; i<OPT.msg_filler; i++)
      filled_msg[i] = '.';
-  sprintf (filled_msg+OPT.msg_filler, "%s %d", msg, msg_num);
+  sprintf (filled_msg+OPT.msg_filler, "%s %d %d", msg, getpid(), msg_num);
 }
 
 void wait_with_msg (unsigned wait_secs)
 {
   unsigned i;
   for (i=0; i<wait_secs; i+=5) {
-    printf ("Sleeping..\n");
+    printf ("Client %d Sleeping..%d\n", getpid(), i);
     sleep (5);
   }
 }
@@ -163,7 +163,7 @@ void client_send_multiple (void)
 	    printf ("Sent msg %lu\n", i);
   }
   if (OPT.send_stop_msg_at_end) {
-    printf ("Sending STOP message\n");
+    printf ("Client %d Sending STOP message\n", getpid());
     strncpy (buf, "STOP\n", 6);
     cmsg_client_send (&CLI.conn, buf, 6, false);
     wait_with_msg (35);

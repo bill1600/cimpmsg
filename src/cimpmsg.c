@@ -48,6 +48,7 @@ static struct server_stuff {
   struct sockaddr_in addr;
   int listen_sock;
   bool terminate_on_keypress;
+  bool close_conn_on_error;
   int listen_state;  // 0=idle, 1=listening, 2=shutting-down
   unsigned idle_notify_secs;
   unsigned inactive_conn_notify_secs;
@@ -57,6 +58,7 @@ static struct server_stuff {
 } SRV
  = { .port = (unsigned int) -1, .listen_sock = -1,
      .terminate_on_keypress = true,
+     .close_conn_on_error = true,
      .listen_state = 0,
      .idle_notify_secs = 2,
      .inactive_conn_notify_secs = 30,
@@ -131,11 +133,29 @@ void set_last_active_time (struct connection *conn)
   pthread_mutex_unlock (&conn->conn_access_mutex);
 }
 
+void check_inactive_connections (process_message_t handle_msg)
+{
+  struct connection *conn;
+  struct connection *oldest_inactive = NULL;
+
+  LL_FOREACH (SRV.connection_list, conn)
+    if (conn->rcv_state >= 0) {
+      if ((NULL == oldest_inactive) ||
+          (time_is_older (&conn->last_active, &oldest_inactive->last_active)) )
+        oldest_inactive = conn;
+    }
+
+  if (NULL != oldest_inactive)
+    if (time_is_out_of_date (&oldest_inactive->last_active, SRV.inactive_conn_notify_secs)) {
+      handle_msg (CMSG_ACTION_CONN_INACTIVE, &oldest_inactive->rcv_data);
+      set_last_active_time (oldest_inactive);
+    }
+}
+
 int wait_server_ready (process_message_t handle_msg, bool *terminated, bool *any_closing)
 {
   struct timeval select_timeout;
   struct connection *conn;
-  struct connection *oldest_inactive = NULL;
   int rtn, sock, highest_sock;
   unsigned idle_timeout_count = 0;
   unsigned max_idle_count;
@@ -149,6 +169,7 @@ int wait_server_ready (process_message_t handle_msg, bool *terminated, bool *any
 
   while (1)
   {
+    check_inactive_connections (handle_msg);
     select_timeout.tv_sec = 0;
     select_timeout.tv_usec = 500000;
     FD_ZERO (&fds);
@@ -208,16 +229,8 @@ int wait_server_ready (process_message_t handle_msg, bool *terminated, bool *any
         conn->rcv_selected = true;
         rtn |= 2;
       }
-      if ((NULL == oldest_inactive) ||
-          (time_is_older (&conn->last_active, &oldest_inactive->last_active)) )
-        oldest_inactive = conn;
     }
   }
-  if (NULL != oldest_inactive)
-    if (time_is_out_of_date (&oldest_inactive->last_active, SRV.inactive_conn_notify_secs)) {
-      handle_msg (CMSG_ACTION_CONN_INACTIVE, &oldest_inactive->rcv_data);
-      set_last_active_time (oldest_inactive);
-    }
   if (SRV.terminate_on_keypress) {
     if (FD_ISSET (STDIN_FILENO, &fds))
       rtn |= 4;
@@ -260,6 +273,8 @@ int cmsg_connect_server (const char *ip_addr, unsigned int port,
 	if (NULL != options) {
 		SRV.terminate_on_keypress = options->terminate_on_keypress;
 		SRV.idle_notify_secs = options->all_idle_notify_secs;
+                if (0 != options->inactive_conn_notify_secs)
+                  SRV.inactive_conn_notify_secs = options->inactive_conn_notify_secs;
 	}
 
 	if ((NULL == ip_addr) || ((unsigned int) -1 == port)) {
@@ -641,9 +656,13 @@ void server_receive_msgs (process_message_t handle_msg, bool *any_closing)
       else
         continue;
       if (rtn < 0) {
-        conn->rcv_state = -2;
-        *any_closing = true;
-        handle_msg (CMSG_ACTION_CONN_DROPPED, &conn->rcv_data);
+        if (SRV.close_conn_on_error) {
+          conn->rcv_state = -2;
+          *any_closing = true;
+          handle_msg (CMSG_ACTION_CONN_DROPPED, &conn->rcv_data);
+        } else {
+          conn->rcv_state = 0; // Ignore
+        }
       }
     }
 }
@@ -792,7 +811,9 @@ int cmsg_server_send (int sock, const char *msg, size_t sz_msg, bool non_block)
   {
     if (conn->rcv_state >= 0) {
       if (conn->rcv_data.sock == sock) {
+        //cmsg_log (LEVEL_DEBUG, ("Sending to client %d\n", sock));
         rtn = __send_msg (sock, msg, sz_msg, non_block);
+        //cmsg_log (LEVEL_DEBUG, ("Sent to client %d, rtn=%d\n", sock, rtn));
         if (0 == rtn)
           set_last_active_time (conn);
         break;

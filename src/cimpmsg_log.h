@@ -26,7 +26,7 @@
 // if TEST_ENVIRONMENT is not defined, then the macros libpd_log and libpd_log_err
 // generate nothing
 #define TEST_ENVIRONMENT 1
-#define TEST_LOG_MAX_LEVEL LEVEL_INFO
+//#define TEST_LOG_MAX_LEVEL LEVEL_INFO
 
 #ifndef TEST_ENVIRONMENT
 #define cmsg_log(level,msg)
