@@ -36,7 +36,9 @@ static struct server_stuff {
   unsigned int max_rcv_count;  // only applies to the first client
   unsigned int idle_notify_count;
   unsigned int max_idle_count;
+  int clients_stopped;
   const char *waiting_msg;
+  const char *stopped_waiting_msg;
   bool close_inactive;
   bool rcv_process_terminated;
   bool send_process_terminated;
@@ -51,7 +53,11 @@ static struct server_stuff {
      .max_rcv_count = 0,
      .idle_notify_count = 0,
      .max_idle_count = 0,
-     .waiting_msg = "Waiting for receive. Press <Enter> to terminate.\n",
+     .clients_stopped = 0,
+     .waiting_msg = 
+       "Waiting for receive. Press <Enter> to terminate.\n",
+     .stopped_waiting_msg = 
+       "Waiting for inactive clients to close (for testing)\n",
      .close_inactive = false,
      .rcv_process_terminated = false,
      .send_process_terminated = false,
@@ -309,7 +315,10 @@ void check_for_stop_msg (connection_t *conn, server_rcv_msg_data_t *rcv_msg_data
   if (strncmp (rcv_msg_data->rcv_msg, "STOP", 4) == 0) {
     printf ("Received STOP message for socket %d\n", rcv_msg_data->sock);
     printf ("Sending no more on socket %d\n", rcv_msg_data->sock);
-    conn->stopped = true;
+    if (!conn->stopped) {
+      conn->stopped = true;
+      ++SRV.clients_stopped;
+    }
   }
 }
 
@@ -342,6 +351,8 @@ void process_rcv_msg (int action_code, server_rcv_msg_data_t *rcv_msg_data)
       LL_FOREACH_SAFE (SRV.connection_list, conn, tmp)
         if (conn->sock == rcv_msg_data->sock) {
           printf ("Socket %d dropped\n", conn->sock);
+          if (conn->stopped)
+            --SRV.clients_stopped;
           LL_DELETE (SRV.connection_list, conn);
           free (conn);
           break;
@@ -355,6 +366,8 @@ void process_rcv_msg (int action_code, server_rcv_msg_data_t *rcv_msg_data)
           if (SRV.close_inactive) {
             printf ("Closing inactive socket %d\n", conn->sock);
             inactive_sock = conn->sock;
+            if (conn->stopped)
+              --SRV.clients_stopped;
             LL_DELETE (SRV.connection_list, conn);
             free (conn);
           } else {
@@ -391,6 +404,10 @@ void process_rcv_msg (int action_code, server_rcv_msg_data_t *rcv_msg_data)
     case CMSG_ACTION_ALL_IDLE_NOTIFY:
       if (!server_received_something) {
         printf (SRV.waiting_msg);
+        break;
+      }
+      if (SRV.clients_stopped > 0) {
+        printf (SRV.stopped_waiting_msg);
         break;
       }
       ++SRV.idle_notify_count;
