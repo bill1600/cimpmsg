@@ -49,9 +49,11 @@ static struct server_stuff {
   int listen_sock;
   bool terminate_on_keypress;
   bool close_conn_on_error;
+  bool linger0_on_server_shutdown;
   int listen_state;  // 0=idle, 1=listening, 2=shutting-down
   unsigned idle_notify_secs;
   unsigned inactive_conn_notify_secs;
+  unsigned max_bind_wait;
   pthread_mutex_t connect_mutex;
   pthread_mutex_t list_mutex;
   struct connection * connection_list;
@@ -59,9 +61,11 @@ static struct server_stuff {
  = { .port = (unsigned int) -1, .listen_sock = -1,
      .terminate_on_keypress = true,
      .close_conn_on_error = true,
+     .linger0_on_server_shutdown = true,
      .listen_state = 0,
      .idle_notify_secs = 2,
      .inactive_conn_notify_secs = 30,
+     .max_bind_wait = 75,
      .connect_mutex = PTHREAD_MUTEX_INITIALIZER,
      .list_mutex = PTHREAD_MUTEX_INITIALIZER,
      .connection_list = NULL
@@ -259,6 +263,36 @@ int make_sockaddr (struct sockaddr_in *addr,
   return 0;
 }
 
+int server_bind_to_sock (int sock)
+{
+  unsigned delay = 0;
+  unsigned total_delay = 0;
+
+  while (true) {
+    if (bind (sock, (struct sockaddr *) &SRV.addr, 
+         sizeof (struct sockaddr_in)) == 0) 
+       return 0;
+    if (errno != EADDRINUSE) {
+      cmsg_log_err (LEVEL_ERROR, errno, 
+	  ("CIMPMSG: Unable to bind to receive socket"));
+      return errno;
+    }
+    if (total_delay >= SRV.max_bind_wait)
+      return errno;
+    if (delay == 0)
+      delay = 5;
+    else if (delay == 5)
+      delay = 10;
+    else
+      delay = 15;
+    cmsg_log (LEVEL_INFO, ("CIMPMSG: bind address already in use. Waiting %u secs\n",
+      delay));
+    sleep (delay);
+    total_delay += delay;
+  } 
+}
+
+
 int cmsg_connect_server (const char *ip_addr, unsigned int port,
   server_opts_t *options)
 {
@@ -310,14 +344,11 @@ int cmsg_connect_server (const char *ip_addr, unsigned int port,
  		return -1;
 	}
 #endif
-	if (bind (sock, (struct sockaddr *) &SRV.addr, 
-          sizeof (struct sockaddr_in)) < 0) {
-		cmsg_log_err (LEVEL_ERROR, errno, 
-		  ("CIMPMSG: Unable to bind to receive socket"));
-		rtn = errno;
-		close (sock);
-		pthread_mutex_unlock (&SRV.connect_mutex);
-		return rtn;
+        rtn = server_bind_to_sock (sock);
+	if (rtn != 0) {
+	  close (sock);
+	  pthread_mutex_unlock (&SRV.connect_mutex);
+	  return rtn;
 	}
 	if (listen (sock, 50) == -1) {
 	  cmsg_log_err (LEVEL_ERROR, errno, 
@@ -399,16 +430,10 @@ int server_accept (process_message_t handle_msg)
 
 }
 
-void shutdown_sock (int sock)
+void close_sock_linger0 (int sock)
 {
     struct linger linger_opt = {1, 0};
 
-    if (shutdown (sock, SHUT_RDWR) != 0)
-      cmsg_log_err (LEVEL_ERROR, errno, 
-       ("CIMPMSG: Error shutting down socket %d", sock));
-    if (close (sock) == 0)
-      return;
-    cmsg_log_err (LEVEL_ERROR, errno, ("CIMPMSG: Error closing socket %d", sock));
     if (setsockopt (sock, SOL_SOCKET, SO_LINGER, &linger_opt, sizeof linger_opt) < 0) {
       cmsg_log_err (LEVEL_ERROR, errno, 
         ("CIMPMSG: Error setting linger sockopt for socket %d", sock));
@@ -418,10 +443,32 @@ void shutdown_sock (int sock)
       cmsg_log_err (LEVEL_ERROR, errno, ("CIMPMSG: Error closing socket %d", sock));
 }
 
+void shutdown_sock (int sock)
+{
+#if 0 // I don't think this helps
+    if (shutdown (sock, SHUT_RDWR) != 0)
+      cmsg_log_err (LEVEL_ERROR, errno, 
+       ("CIMPMSG: Error shutting down socket %d", sock));
+#endif
+    if (close (sock) == 0)
+      return;
+    cmsg_log_err (LEVEL_ERROR, errno, ("CIMPMSG: Error closing socket %d", sock));
+    close_sock_linger0 (sock);
+}
+
+void shutdown_server_sock (int sock)
+{
+   //if ((SRV.listen_state == 2) && SRV.linger0_on_server_shutdown)
+   if (SRV.linger0_on_server_shutdown)
+      close_sock_linger0 (sock);
+   else
+      shutdown_sock (sock);
+}
+
 void shutdown_connection (struct connection *conn)
 {
   if (conn->rcv_state != -1) {
-    shutdown_sock (conn->rcv_data.sock);
+    shutdown_server_sock (conn->rcv_data.sock); 
     conn->rcv_data.sock = -1;
     conn->rcv_state = -1;
     pthread_mutex_destroy (&conn->conn_access_mutex);
@@ -435,13 +482,17 @@ void shutdown_server (void)
   struct connection *conn;
   struct connection *tmp;
 
+  pthread_mutex_lock (&SRV.connect_mutex);
+  SRV.listen_state = 2;
+  pthread_mutex_unlock (&SRV.connect_mutex);
+
   if (SRV.listen_sock != -1) {
     LL_FOREACH_SAFE (SRV.connection_list, conn, tmp) {
       LL_DELETE (SRV.connection_list, conn);
       shutdown_connection (conn);
       free (conn);
     }
-    shutdown_sock (SRV.listen_sock);
+    shutdown_server_sock (SRV.listen_sock);
   }
 }
 
@@ -526,6 +577,8 @@ ssize_t socket_receive (struct connection *conn, void *buf, size_t len, bool *te
       }
     }
     conn->oserr = errno;
+    if (errno == ECONNRESET) // socket closed by peer
+      return 0;
     return -1;
   }
 }
@@ -591,6 +644,10 @@ int receive_msg_data (struct connection *conn, process_message_t handle_msg,
     return CMSG_ERR_RCV_OS_ERROR;
   }
 
+  if (bytes == 0) {
+    cmsg_log (LEVEL_DEBUG, ("CIMPMSG: Receive message. Socket %d closed by sender\n", sock));
+    return CMSG_ERR_RCV_SOCKET_CLOSED;
+  }
   if ((size_t) bytes > read_len) {
     cmsg_log (LEVEL_ERROR, ("CIMPMSG: bytes received %ld not eq read_len in header %lu\n",
 	bytes, read_len));
@@ -732,10 +789,6 @@ int cmsg_server_listen_for_msgs (process_message_t handle_msg, bool *terminated)
 	break;
   }
   cmsg_log (LEVEL_INFO, ("CIMPMSG: Exiting cmsg_server_listen_for_msgs\n"));
-
-  pthread_mutex_lock (&SRV.connect_mutex);
-  SRV.listen_state = 2;
-  pthread_mutex_unlock (&SRV.connect_mutex);
 
   shutdown_server ();
   return 0;

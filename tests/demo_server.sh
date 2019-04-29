@@ -9,7 +9,7 @@ query() {
   eval $2=\"$RTN\"
 }
 
-query "Close first client after 175 msgs" m_opt "m 175"
+#query "Close first client after 175 msgs" m_opt "m 175"
 
 ci_opt=""
 if [ "$m_opt" == "" ]; then
@@ -19,5 +19,5 @@ fi
 query "Exit after 8 \"Waiting ...\" messages" i_opt "i 8"
 
 
-../build/tests/cimpmsg_test_server p 6666 $m_opt $ci_opt $i_opt
+../build/tests/cimpmsg_test_server p 6666 $ci_opt $i_opt
 

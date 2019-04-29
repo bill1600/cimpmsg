@@ -164,7 +164,7 @@ void client_send_multiple (void)
   }
   if (OPT.send_stop_msg_at_end) {
     printf ("Client %d Sending STOP message\n", getpid());
-    strncpy (buf, "STOP\n", 6);
+    strncpy (buf, "STOP.", 6);
     cmsg_client_send (&CLI.conn, buf, 6, false);
     wait_with_msg (35);
   }
@@ -274,7 +274,7 @@ int main (const int argc, const char **argv)
 		exit(4);
 	}
 	if (cmsg_connect_client (&CLI.conn, IP_ADDR, port, 
-		SOCK_SEND_TIMEOUT_MSEC) < 0)
+		SOCK_SEND_TIMEOUT_MSEC) != 0)
 	    exit(4);
 	if (create_thread (&client_rcv_thread_id, client_receiver_thread, &CLI.conn) == 0)
 	{
