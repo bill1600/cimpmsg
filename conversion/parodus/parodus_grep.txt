@@ -1,0 +1,59 @@
+	addToList
+		called in upstream.c processUpstreamMessage
+		for SVC_REGISTRATION messages
+client_list.c:64:    sock = nn_socket( AF_SP, NN_PUSH );
+client_list.c:69:            rc = nn_setsockopt(sock, NN_SOL_SOCKET, NN_SNDTIMEO, &t, sizeof(t));
+client_list.c:75:            rc = nn_connect(sock, (*msg)->u.reg.url);
+client_list.c:79:		if (nn_close (sock) < 0)
+client_list.c:81:                   ParodusError ("nn_close socket=%d (err=%d, %s)\n", 
+	sendAuthStatus
+		called in upstream.c processUpstreamMessage
+		for SVC_REGISTRATION messages
+client_list.c:174:	        byte = nn_send (new_node->sock, auth_bytes, size, 0);
+	deleteFromList
+		called from service_alive.c serviceAliveTask
+client_list.c:227:                        if(nn_shutdown(curr_node->sock, curr_node->endpoint) < 0)
+client_list.c:229:                           ParodusError ("nn_shutdown socket=%d endpt=%d, err=%d\n", 
+client_list.c:232:			if (nn_close (curr_node->sock) < 0)
+client_list.c:234:                           ParodusError ("nn_close socket=%d err=%d\n",
+		sendMsgtoRegisteredClients
+			called in upstream.c getServiceNameAndSendResponse
+			called in processUpstreamMessage
+client_list.c:285:			bytes = nn_send(temp->sock, *Msg, msgSize, 0);
+
+	listenerOnMessage
+		just processes one message
+		called in thread_tasks messageHandlerTask
+			which is called in conn_interface createSocketConnection
+		could replace with sendMsgtoRegisteredClients
+downstream.c:137:                                bytes = nn_send(temp->sock, recivedMsg, msgSize, 0);
+
+	serviceAliveTask
+		called in conn_interface createSocketConnection
+service_alive.c:100:				        byte = nn_send (temp->sock, svc_bytes, size, 0);
+
+	handle_upstream			
+		called in conn_interface createSocketConnection
+		we should call cmsg_connect_server and cmsg_server_listen_for_msgs
+		in handle_upstream
+upstream.c:129:    sock = nn_socket( AF_SP, NN_PULL );
+upstream.c:133:        int rc = nn_setsockopt(sock, NN_SOL_SOCKET, NN_RCVTIMEO, &t, sizeof(t));
+upstream.c:139:        bind = nn_bind(sock, get_parodus_cfg()->local_url);
+upstream.c:150:                bytes = nn_recv (sock, &buf, NN_MSG, 0);
+upstream.c:193:	    if(nn_shutdown(sock, bind) < 0)
+upstream.c:195:	        ParodusError ("nn_shutdown bind socket=%d endpt=%d, err=%d\n", 
+upstream.c:198:	    if (nn_close (sock) < 0)
+upstream.c:200:	        ParodusError ("nn_close bind socket=%d err=%d\n", 
+	processUpstreamMessage
+		for SVC_REGISTRATION messages
+		called in conn_interface createSocketConnection
+upstream.c:262:                                if(nn_shutdown(temp->sock, temp->endpoint) < 0)
+upstream.c:264:                                    ParodusError ("nn_shutdown socket=%d endpt=%d, err=%d\n", 
+upstream.c:267:				if (nn_close (temp->sock) < 0)
+upstream.c:269:                                    ParodusError ("nn_close socket=%d err=%d\n", 
+upstream.c:273:                                temp->sock = nn_socket(AF_SP,NN_PUSH );
+upstream.c:277:                                    rc = nn_setsockopt(temp->sock, NN_SOL_SOCKET, NN_SNDTIMEO, &t, sizeof(t));
+upstream.c:282:                                    rc = nn_connect(temp->sock, msg->u.reg.url); 
+
+upstream.c:432:			//nn_freemsg should not be done for parodus/tags/ CRUD requests as it is not received through nanomsg.
+upstream.c:439:				if(nn_freemsg (message->msg) < 0)

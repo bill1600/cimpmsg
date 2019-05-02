@@ -82,6 +82,7 @@ int cmsg_connect_server (const char *ip_addr, unsigned int port,
 int cmsg_server_listen_for_msgs (process_message_t handle_msg, bool *terminated);
 // Will exit and shutdown server if terminated flag is set,
 // or if option terminate_on_keypress specified and a key is pressed
+// When the action code is CMSG_ACTION_MSG_RECEIVED, the message needs to be freed
 int cmsg_server_send (int sock, const char *msg, size_t sz_msg, bool non_block);
 int cmsg_server_close_sock (int sock);
 
